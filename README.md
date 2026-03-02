@@ -1,161 +1,93 @@
-# 🌌 Pygnosis
+# Pygnosis
 
-> **A coherence-driven, correlation-graph-based Minecraft server engine with robotics integration**
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square&logo=python)](https://python.org)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Protocol](https://img.shields.io/badge/Minecraft-1.14.x-orange?style=flat-square)](https://wiki.vg/Protocol)
-[![Status](https://img.shields.io/badge/Status-Experimental-purple?style=flat-square)]()
+**Pygnosis** is an experimental Minecraft server written in Python, featuring a unique *coherence-based physics engine* and a real‑time web dashboard. It supports Minecraft **1.8.9** (protocol 47) and **1.12.2** (protocol 340), and demonstrates how a correlation‑driven model can influence rendering properties (MERS) and entity behaviour.
 
-Pygnosis is an experimental, research-grade Minecraft server written entirely in Python. Rather than treating the game world as a static grid of blocks, it models every object — blocks, entities, players, robots, packets — as a **correlation operator** in a dynamic sparse graph. Simulation priority is allocated by a **coherence scheduler** that concentrates CPU and memory where they matter most, and nearly nothing where they don't.
-
-The project also bridges the virtual world to physical hardware (Arduino, ESP32, Raspberry Pi) through a JSON-configured GPIO microservice, enabling real-world automation from inside Minecraft.
+> ⚠️ **This is a proof‑of‑concept / research project.**  
+> It is not intended for production use and lacks many standard server features.
 
 ---
 
-## ✨ Feature Highlights
+## ✨ Features
 
-- **Correlation Graph Engine** — every game object is a graph node with a coherence value; edges propagate state updates
-- **Coherence-Driven Scheduler** — operators below threshold are compressed to a boundary store; above threshold they run in full continuum
-- **Boundary / Continuum Duality** — inactive chunks are zlib-compressed in-memory; loaded chunks expand into NumPy-backed block matrices
-- **Full Minecraft 1.14 Protocol** — handshake, login, status ping, keep-alive, chat, player position, join-game
-- **Ring Buffer Networking** — lock-free ring buffers for zero-copy I/O; VarInt encoding; per-connection async write queues
-- **Autopoietic Parameter Tuning** — network parameters (timeouts, buffer sizes) self-adjust via a feedback loop using the golden ratio φ ≈ 1.618
-- **Paradox Detection** — server-client state checksums; divergence above threshold triggers full state reconciliation
-- **Robotics Plugin** — robots as composite correlation operators; sensor/actuator bridge to a GPIO microservice
-- **HTTP Admin Dashboard** — live operator listing, coherence stats, robot actuator control via aiohttp
-- **MERS Visual Attributes** — per-operator metalness, emissive, roughness, subsurface values update lazily from coherence
-- **LOD Networking** — entity update detail level is a function of coherence and distance
-- **ComputerCraft Extension (Pygnosis:CC)** — in-game Lua/Python scripting with quantum superposition, temporal recursion, fractal execution, and self-modifying autopoietic code (design doc included)
+- ✅ **Dual‑protocol support** – Handles both 1.8.9 and 1.12.2 clients.
+- 🧠 **Coherence Engine** – Every entity (player, chunk, item, robot) has a *coherence* value that affects its visual properties (metalness, emissive, roughness, subsurface). Coherence propagates through a graph and is globally conserved.
+- 🌐 **Live Admin Dashboard** – Built with `aiohttp`, Chart.js, and Three.js. Monitor operators, inspect MERS values, compress chunks, and spawn robots – all from your browser.
+- 🤖 **Robotics Plugin** – Simulated GPIO with temperature sensors and a fan actuator. The robot’s behaviour (fan on/off) influences its coherence and visual appearance.
+- 🗺️ **Boundary Store** – Chunks can be compressed to a lightweight boundary representation to save memory, and inflated when needed.
+- 📦 **Minimal dependencies** – Only requires `aiohttp` for the web server and dashboard.
 
 ---
 
-## 📦 Package Structure
+## 📋 Requirements
 
-```
-pygnosis/
-├── core.py        # CorrelationOperator, Graph, Scheduler, PhysicsEngine
-├── world.py       # Chunk, Block palette, Inventory, Player, Item entities
-├── robotics.py    # Robot operator, SimulatedGPIO, RoboticsPlugin
-├── network.py     # RingBuffer, VarInt, PacketOperator, ClientConnection, NetworkManager
-├── protocol.py    # Protocol_1_14 — handshake / login / play / status handlers
-├── admin.py       # aiohttp HTTP admin server & dashboard
-└── main.py        # Entry point with argparse (--debug flag)
-```
-
-Design documents for additional subsystems live in `docs/`:
-- `Physics_Engine.md` — plugin architecture, JIT kernels, multiprocessing federation
-- `block-character-inventory_Management.md` — block update propagation, entity AI, inventory ops
-- `Robotics-Framework.md` — JSON config schemas, GPIO microservice, hardware drivers
-- `TCPIP-IPX_Enhanced_Protocol_Networking_Framework.md` — packet-as-operator, semantic grammar, LOD networking
-- `Pygnosis_CC___Correlation_ComputerCraft_Framework.md` — in-game scripting environment
-- `Foundational_Math.md` / `Graphical_Mods.md` — underlying theoretical frameworks
+- Python **3.7+**
+- [aiohttp](https://docs.aiohttp.org/) (install via `pip`)
+- A Minecraft client (1.8.9 or 1.12.2) for testing
 
 ---
 
-## 🚀 Quick Start
+## 🔧 Installation
 
-### Requirements
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/TaoishTechy/pygnosis.git
+   cd pygnosis
+   ```
 
-```
-Python 3.11+
-aiohttp
-```
+2. (Optional) Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate   # On Windows: venv\Scripts\activate
+   ```
 
-Optional for performance:
-```
-numba       # JIT-compiled physics kernels
-numpy       # block matrix storage
-zstandard   # chunk compression (falls back to zlib)
-```
+3. Install the required package:
+   ```bash
+   pip install aiohttp
+   ```
 
-### Install & Run
+That’s it! Pygnosis uses only the standard library plus `aiohttp`.
+
+---
+
+## 🚀 Usage
+
+Start the server with:
 
 ```bash
-git clone https://github.com/TaoishTechy/pygnosis
-cd pygnosis
-pip install aiohttp
-python main.py
+python src/main.py
 ```
 
-With debug output:
+To enable verbose debug output (shows coherence changes, packet details):
+
 ```bash
-python main.py --debug
+python src/main.py --debug
 ```
 
-The server starts three services:
-| Service | Address | Purpose |
-|---------|---------|---------|
-| Minecraft protocol | `0.0.0.0:25565` | Vanilla client connections (1.14.x) |
-| HTTP admin | `http://localhost:8081` | Operator dashboard, robot control |
-| Physics engine | internal | 20 TPS coherence-driven simulation loop |
+Once running:
 
----
+- **Minecraft clients** can connect to `localhost:25565` (or your server’s IP).
+- Open the **admin dashboard** at [http://localhost:8081](http://localhost:8081).
 
-## 🏗️ Architecture Overview
-
-```
-┌─────────────────────────────────────────────────┐
-│                   main.py                        │
-│   PhysicsEngine ─ AdminServer ─ RoboticsPlugin  │
-│              └──── NetworkManager               │
-└────────┬────────────────────────────────────────┘
-         │
-┌────────▼────────────────────────────────────────┐
-│              core.py                            │
-│  CorrelationOperator                            │
-│    ├─ coherence (float 0–1)                     │
-│    ├─ edges (Set[str])                          │
-│    └─ MERS visual attrs (lazy)                  │
-│  CorrelationGraphManager (priority heap)        │
-│  CoherenceScheduler (decay + propagate)         │
-│  PhysicsEngine (asyncio 20 TPS loop)            │
-└────────┬──────────────┬──────────────┬──────────┘
-         │              │              │
-   world.py       network.py     robotics.py
-  Chunk/Block   RingBuffer       Robot
-  Inventory     PacketOperator   SimulatedGPIO
-  Player/Item   NetworkManager   RoboticsPlugin
-                protocol.py
-               Protocol_1_14
-```
-
-### Coherence Lifecycle
-
-```
-New operator → CI = initial value
-     │
-     ▼
-CI > 0.3 → ACTIVE (simulated every tick, graph propagation)
-     │
-     ▼ (decay -0.012/tick, no player proximity)
-CI < 0.3 → BOUNDARY (compressed, minimal memory footprint)
-     │
-     ▼ (player approaches / event triggered)
-     └──→ ACTIVE again (inflate from boundary store)
-```
+The server will automatically detect the client’s protocol version and use the correct packet format.
 
 ---
 
 ## ⚙️ Configuration
 
-Network behaviour is controlled by `network_config.json` (auto-generated with defaults if absent):
+The file `network_config.json` in the `src/` directory controls network behaviour:
 
 ```json
 {
-  "protocols": ["1.14"],
-  "ring_buffer_size": 16536,
-  "coherence": {
-    "update_interval": 0.05,
-    "lod_levels": [
-      {"max_distance": 10,  "detail": "full"},
-      {"max_distance": 50,  "detail": "compressed"},
-      {"max_distance": 200, "detail": "boundary"}
-    ]
-  },
+  "protocols": ["1.8", "1.12.2"],
+  "default_protocol": "1.8",
+  "read_timeout": 30.0,
+  "ring_buffer_size": 16384,
   "autopoietic": {
-    "enabled": true,
-    "tune_interval": 5.0,
+    "enabled": false,
+    "tune_interval": 30,
     "golden_ratio": 1.618
   },
   "paradox": {
@@ -165,91 +97,92 @@ Network behaviour is controlled by `network_config.json` (auto-generated with de
 }
 ```
 
-Robotics hardware is configured via JSON files in `config/robotics/`:
-- `robots.json` — robot body, sensors, actuators, controller class
-- `mappings.json` — game events → hardware commands
-- `automations.json` — threshold rules (e.g., temperature > 30 → broadcast warning)
-- `hardware_profiles.json` — serial/HTTP/MQTT device definitions
+- `read_timeout` – seconds before a client is considered dead.
+- `autopoietic` / `paradox` – reserved for future coherence‑based experiments.
 
 ---
 
-## 🤖 Robotics Integration
+## 🌐 Admin Dashboard
 
-Robots are first-class correlation operators. The `RoboticsPlugin` polls a `GPIOClient` (real HTTP, or the included `SimulatedGPIO` for testing) every tick:
+The dashboard provides real‑time insight into the coherence graph.
 
-```python
-robotics.spawn_robot("greenhouse")
-# Robot monitors temperature, activates fan relay above 28°C
-```
+### Endpoints
 
-The GPIO Microservice supports three driver types out of the box:
+- `/` – Interactive HTML dashboard.
+- `/api/status` – Server tick rate, operator count, global coherence, etc.
+- `/api/operators` – List all operators with their current MERS and LOD bias.
+- `/api/operator/<id>` – Detailed view of a single operator.
+- `/api/edges` – Graph edges between operators.
+- `/api/entities` – Players, items, and robots with their positions/inventories.
+- `/api/history` – Time‑series of global coherence (for Chart.js).
+- `/api/control/<action>` – POST actions like `compress_chunk` or `spawn_robot`.
+- `/ws` – WebSocket endpoint for live updates (basic placeholder).
 
-| Driver | Protocol | Typical Hardware |
-|--------|----------|-----------------|
-| Serial | USB/UART | Arduino, Micro:bit |
-| HTTP   | REST     | ESP8266/32 |
-| MQTT   | pub/sub  | distributed sensor networks |
+### Dashboard Controls
 
-Physical ↔ virtual synchronisation is bidirectional: real-world sensor readings update the robot operator's coherence and MERS visual attributes; in-game lever triggers send HTTP commands to actuators.
-
----
-
-## 🌐 Protocol Support
-
-| Version | Protocol Numbers | Status |
-|---------|-----------------|--------|
-| 1.14 – 1.14.4 | 477 – 498 | ✅ Implemented |
-| 1.15 – 1.20   | —         | 🔲 Planned (handler stubs ready) |
-
-The `NetworkManager` accepts raw TCP connections, buffers data in per-client `RingBuffer` instances, decodes VarInt-prefixed packets, and dispatches to versioned `ProtocolHandler` subclasses. Unsupported protocol versions receive a graceful disconnect with an explanatory message.
+- **Compress Chunk (0,0)** – Moves the chunk at (0,0) to the boundary store, freeing memory.
+- **Spawn Robot** – Creates a new robot with a random ID; its temperature sensor and fan can be observed.
 
 ---
 
-## 🔬 Design Philosophy
+## 🧠 How It Works
 
-Pygnosis treats game-state management as a problem in **sparse information dynamics** rather than brute-force tick processing. The key insight is that most of a Minecraft world is idle at any given moment. Rather than simulating every block and entity every tick, the coherence graph ensures:
+### Correlation Operators
 
-1. **Only active regions consume CPU** — coherence decay naturally quiesces untouched areas.
-2. **Memory scales with activity** — boundary-stored chunks occupy kilobytes; continuum chunks expand only when needed.
-3. **Updates propagate locally** — block changes excite neighbours through commutator evaluation, not a global scan.
-4. **Network mirrors simulation priority** — LOD levels for entity updates follow coherence, so high-importance entities get more bandwidth.
+Every object in the world (players, chunks, items, robots) is a `CorrelationOperator`. Each operator has:
 
-This enables theoretical support for far larger worlds and more connected clients than a conventional uniform-tick server at equivalent hardware cost.
+- `coherence` – a float between 0 and 1, representing its “importance” or “activity”.
+- `_mers` – Metalness, Emissive, Roughness, Subsurface – visual properties that are automatically updated based on coherence.
+- `_animation_params` – Speed, amplitude, phase for shader‑based animations.
+- `edges` – references to other operators, forming a graph.
 
----
+Coherence changes propagate through the graph via *commutators*, simulating a loose form of quantum‑inspired interaction. The global coherence sum is conserved (`_total_coherence`).
 
-## 🗺️ Roadmap
+### Network Handling
 
-- [ ] 1.15 – 1.20 protocol handlers
-- [ ] Full chunk packet encoding (Chunk Data 0x22)
-- [ ] NumPy block matrix integration (replace `dict` block storage)
-- [ ] Numba JIT kernels for light propagation and fluid simulation
-- [ ] Pygnosis:CC — in-game Lua/Python scripting (ComputerCraft-style)
-- [ ] Multiprocessing federation for disjoint chunk regions
-- [ ] Web dashboard with live coherence graph visualisation
-- [ ] Real GPIO microservice (production-grade, separate process)
-- [ ] MQTT driver for distributed sensor networks
-- [ ] Plugin API (load custom `.py` physics plugins from `/physics/configs/`)
+- `network.py` implements an asynchronous TCP server using `asyncio`.
+- Incoming packets are parsed according to the protocol version (handshake → login → play).
+- `protocol.py` contains version‑specific packet definitions and handlers.
+- Keep‑alive logic is version‑aware (different packet IDs and ID encodings).
+
+### Robotics Plugin
+
+- `robotics.py` simulates a simple greenhouse environment.
+- A robot reads a temperature sensor (with random fluctuations) and controls a fan.
+- Temperature changes affect the robot’s coherence, which in turn alters its emissive value – a visible feedback loop.
+
+### Chunks and Boundary Store
+
+- Chunks are initially “boundary” objects (only metadata). When a player moves nearby, the chunk is *inflated* – its block data is loaded (or generated).
+- After being unused, a chunk can be *compressed* back to the boundary store, discarding block‑level detail but keeping summary information.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions welcome. Please open an issue before large PRs.
+Contributions are welcome! This project is experimental, so feel free to open issues or pull requests for:
 
-Areas of particular interest:
-- Protocol completeness (chunk encoding, entity metadata)
-- Performance benchmarking under load
-- Numba kernel implementations for physics
-- Hardware driver implementations
-- Test coverage for the coherence scheduler
+- Bug fixes
+- Additional protocol versions
+- Enhanced coherence models
+- Dashboard improvements
+
+Please follow the existing code style and include docstrings for new classes/methods.
 
 ---
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ---
 
-*All configurations and code should be used ethically, in service of creativity, learning, and exploration.*
+## 🙏 Acknowledgements
+
+- Packet structures derived from [wiki.vg](https://wiki.vg/).
+- Inspired by concepts from autopoietic systems and coherence‑based rendering.
+
+---
+
+*Happy hacking!*  
+– The Pygnosis Team
