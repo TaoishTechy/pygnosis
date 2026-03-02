@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 import random
+import struct
 from typing import Dict, Optional, Any, List, Tuple
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -184,8 +185,8 @@ class NetworkManager:
                 client.last_keep_alive_id = keep_alive_id
                 client.keep_alive_pending = True
 
-                # Send keep-alive packet (0x00 in PLAY state)
-                await client.send_packet(0x00, struct.pack('>Q', keep_alive_id))
+                # Send keep-alive packet (0x20 in PLAY state for 1.14)
+                await client.send_packet(0x20, struct.pack('>Q', keep_alive_id))
 
                 # Wait for response (timeout half the interval)
                 for _ in range(int(client.keep_alive_interval * 10)):  # check every 0.1s
