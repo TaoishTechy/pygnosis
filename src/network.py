@@ -7,8 +7,8 @@ import os
 import uuid
 import random
 import struct
-from typing import Dict, Optional, Any, List, Tuple
-from dataclasses import dataclass
+from typing import Dict, Optional, Any, List
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 
 from core import CorrelationOperator, CorrelationGraphManager, _total_coherence, adjust_global_coherence
 
-# --- PacketOperator for network coherence ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PacketOperator — lightweight coherence node per received packet
+# ─────────────────────────────────────────────────────────────────────────────
 class PacketOperator(CorrelationOperator):
     def __init__(self, ptype: str, payload: bytes, src: str):
         super().__init__(ptype, initial_ci=0.2)
@@ -24,6 +27,10 @@ class PacketOperator(CorrelationOperator):
         self.payload_len = len(payload)
         self.update_coherence(0.05 * len(payload) / 1024, "packet received")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ClientConnection
+# ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ClientConnection:
     client_id: str
@@ -35,16 +42,19 @@ class ClientConnection:
     keep_alive_pending: bool = False
     last_keep_alive_id: int = 0
     keep_alive_task: Optional[asyncio.Task] = None
-    keep_alive_interval: float = 20.0  # seconds
+    keep_alive_interval: float = 15.0   # seconds — 15s is safe for all versions
     _closed: bool = False
 
     async def send_packet(self, packet_id: int, data: bytes):
         if self._closed:
             return
-        payload = bytes([packet_id]) + data
-        length = encode_varint(len(payload))
-        full_data = length + payload
-        self.transport.write(full_data)
+        try:
+            payload    = bytes([packet_id]) + data
+            length     = encode_varint(len(payload))
+            self.transport.write(length + payload)
+        except Exception as e:
+            print(f"⚠️  send_packet error pid=0x{packet_id:02x}: {e}")
+            await self.close()
 
     async def close(self):
         if self._closed:
@@ -53,165 +63,170 @@ class ClientConnection:
         if self.keep_alive_task:
             self.keep_alive_task.cancel()
             self.keep_alive_task = None
-        self.transport.close()
+        try:
+            self.transport.close()
+        except Exception:
+            pass
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NetworkManager
+# ─────────────────────────────────────────────────────────────────────────────
 class NetworkManager:
     def __init__(self, engine, config_path: str):
-        self.engine = engine
-        self.config = json.load(open(config_path)) if os.path.exists(config_path) else {}
+        self.engine       = engine
+        self.config       = json.load(open(config_path)) if os.path.exists(config_path) else {}
         self.clients: Dict[str, ClientConnection] = {}
         self.packet_graph = CorrelationGraphManager()
-        self.server = None
-        self.read_timeout = self.config.get("read_timeout", 30.0)  # seconds
+        self.server       = None
+        self.read_timeout = self.config.get("read_timeout", 30.0)
 
     async def start(self, host: str, port: int):
         self.server = await asyncio.start_server(self.handle_client, host, port)
         print(f"🌍 NetworkManager listening on {host}:{port}")
 
+    # ── per-client coroutine ──────────────────────────────────────────────────
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         from protocol import HandshakeHandler
 
         client_id = str(uuid.uuid4())
-        transport = writer.transport
         client = ClientConnection(
-            client_id=client_id,
-            transport=transport,
-            handler=HandshakeHandler()
+            client_id  = client_id,
+            transport  = writer.transport,
+            handler    = HandshakeHandler(),
         )
         self.clients[client_id] = client
-        print(f"🔌 Client {client_id} connected")
+        print(f"🔌 Client {client_id[:8]} connected from {writer.get_extra_info('peername')}")
 
         try:
-            while True:
-                await self._process_client_data(client, reader)
+            while not client._closed:
+                await self._read_one_packet(client, reader)
         except asyncio.CancelledError:
             pass
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
-            print(f"🔌 Client {client_id} connection lost")
+            print(f"🔌 Client {client_id[:8]} ({client.username or 'unknown'}) connection lost")
         except Exception as e:
             import traceback
-            print(f"🔥 Unexpected error for client {client_id}: {e}")
+            print(f"🔥 Client {client_id[:8]} unexpected error: {e}")
             traceback.print_exc()
         finally:
             await client.close()
-            if client_id in self.clients:
-                del self.clients[client_id]
-            print(f"🔌 Client {client_id} disconnected")
+            self.clients.pop(client_id, None)
+            print(f"🔌 Client {client_id[:8]} ({client.username or 'unknown'}) disconnected")
 
-    async def _process_client_data(self, client: ClientConnection, reader: asyncio.StreamReader):
-        # Read packet length (VarInt) with timeout
-        try:
-            # First byte with timeout
-            len_data = await asyncio.wait_for(reader.readexactly(1), timeout=self.read_timeout)
-        except asyncio.TimeoutError:
-            print(f"⏰ Client {client.client_id} read timeout (no data for {self.read_timeout}s)")
-            raise asyncio.CancelledError  # trigger disconnect
-
-        byte = len_data[0]
-        length = byte & 0x7F
-        bytes_needed = 1
-        while byte & 0x80:
-            # Read next byte
+    # ── packet reader ─────────────────────────────────────────────────────────
+    async def _read_one_packet(self, client: ClientConnection, reader: asyncio.StreamReader):
+        # --- read VarInt length ---
+        length    = 0
+        shift     = 0
+        num_bytes = 0
+        while True:
             try:
-                len_data = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+                b = (await asyncio.wait_for(reader.readexactly(1), timeout=self.read_timeout))[0]
             except asyncio.TimeoutError:
-                print(f"⏰ Client {client.client_id} read timeout during varint")
+                print(f"⏰ Client {client.client_id[:8]} timed out waiting for data")
                 raise asyncio.CancelledError
-            byte = len_data[0]
-            length = (length << 7) | (byte & 0x7F)
-            bytes_needed += 1
-            if bytes_needed > 5:
-                raise ValueError("VarInt too long (possible attack)")
+            length |= (b & 0x7F) << shift
+            shift  += 7
+            num_bytes += 1
+            if not (b & 0x80):
+                break
+            if num_bytes > 5:
+                raise ValueError("VarInt too long — possible attack or garbage data")
 
-        # Read full packet payload
+        if length == 0:
+            return   # empty packet — ignore
+
+        # --- read payload ---
         try:
-            payload = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
+            payload = await asyncio.wait_for(reader.readexactly(length), timeout=10.0)
         except asyncio.TimeoutError:
-            print(f"⏰ Client {client.client_id} read timeout for payload")
+            print(f"⏰ Client {client.client_id[:8]} timed out reading payload ({length} bytes)")
             raise asyncio.CancelledError
 
-        packet_id = payload[0]
+        packet_id      = payload[0]
         packet_payload = payload[1:]
 
-        # PacketOperator for coherence tracking
+        # coherence tracking
         pkt_op = PacketOperator(f"0x{packet_id:02x}", packet_payload, client.client_id)
         self.packet_graph.add(pkt_op)
 
-        # Dispatch using current handler
         if client.handler:
             await client.handler.handle_packet(client, packet_id, packet_payload, self.engine)
         else:
-            print(f"⚠️ No handler for client {client.client_id}")
+            print(f"⚠️  No handler for client {client.client_id[:8]}")
 
+    # ── keep-alive ────────────────────────────────────────────────────────────
     def start_keep_alive(self, client: ClientConnection):
-        """Start the keep-alive loop for a client that has entered PLAY state."""
         if client.keep_alive_task is not None:
             client.keep_alive_task.cancel()
         client.keep_alive_task = asyncio.create_task(self._keep_alive_loop(client))
 
     async def _keep_alive_loop(self, client: ClientConnection):
-        """Send keep-alive packets periodically and check for response."""
-        try:
-            while not client._closed and client.protocol_state == "PLAY" and client.client_id in self.clients:
-                # Wait before sending next keep-alive
-                await asyncio.sleep(client.keep_alive_interval)
+        """
+        Version-aware keep-alive sender.
 
+        1.8.9  → packet 0x00, ID as VarInt
+        1.12.2 → packet 0x1F, ID as int64 big-endian
+
+        The handler class exposes:
+            keep_alive_packet_id  : int
+            keep_alive_id_encoder : callable(int) -> bytes
+        """
+        try:
+            while not client._closed and client.protocol_state == "PLAY":
+                await asyncio.sleep(client.keep_alive_interval)
                 if client._closed:
                     break
 
-                # Generate a random keep-alive ID
-                keep_alive_id = random.getrandbits(64)
-                client.last_keep_alive_id = keep_alive_id
-                client.keep_alive_pending = True
+                handler = client.handler
+                if handler is None:
+                    break
 
-                # Send keep-alive packet (0x20 in PLAY state for 1.14)
-                await client.send_packet(0x20, struct.pack('>Q', keep_alive_id))
+                ka_id   = random.getrandbits(32)         # 32-bit fits both versions
+                client.last_keep_alive_id  = ka_id
+                client.keep_alive_pending  = True
 
-                # Wait for response (timeout half the interval)
-                for _ in range(int(client.keep_alive_interval * 10)):  # check every 0.1s
-                    await asyncio.sleep(0.1)
+                ka_pid     = getattr(handler, "keep_alive_packet_id",  0x1F)
+                ka_encoder = getattr(handler, "keep_alive_id_encoder", lambda i: struct.pack(">q", i))
+
+                await client.send_packet(ka_pid, ka_encoder(ka_id))
+
+                # wait up to half the interval for a response
+                deadline = asyncio.get_event_loop().time() + client.keep_alive_interval / 2
+                while asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(0.2)
                     if not client.keep_alive_pending or client._closed:
                         break
                 else:
-                    # No response – disconnect client
-                    print(f"⚠️ Client {client.username or client.client_id} timed out (keep-alive)")
+                    print(f"⚠️  {client.username or client.client_id[:8]} keep-alive timeout — disconnecting")
                     await client.close()
                     break
+
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            print(f"🔥 keep-alive error for {client.username}: {e}")
 
-    def _check_paradox(self, client: ClientConnection) -> bool:
-        # Placeholder
-        return False
-
-    async def _reconcile_client(self, client: ClientConnection):
-        pass
-
-    async def _autopilot_loop(self):
-        golden = self.config.get("autopoietic", {}).get("golden_ratio", 1.618)
-        interval = self.config.get("autopoietic", {}).get("tune_interval", 30)
-        while True:
-            await asyncio.sleep(interval)
-            metrics = self._collect_metrics()
-            print(f"⚙️ Autopoietic tuning: metrics {metrics}")
-
-    def _collect_metrics(self) -> dict:
-        return {"rtt": 50, "loss": 0.01, "throughput": 1000}
-
+    # ── broadcast ─────────────────────────────────────────────────────────────
     async def broadcast_packet(self, packet_id: int, data: bytes, exclude=None):
-        for cid, client in self.clients.items():
+        for cid, client in list(self.clients.items()):
             if cid != exclude and not client._closed:
                 await client.send_packet(packet_id, data)
 
     def get_updates_for_client(self, client_id: str, max_bytes: int) -> List[bytes]:
-        # TODO: implement entity tracking and delta compression
+        # TODO: delta compression + entity tracking
         return []
 
-# --- VarInt helpers ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VarInt helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def encode_varint(value: int) -> bytes:
     out = bytearray()
+    value &= 0xFFFFFFFF          # treat as unsigned 32-bit
     while True:
-        byte = value & 0x7F
+        byte   = value & 0x7F
         value >>= 7
         if value:
             out.append(byte | 0x80)
@@ -220,19 +235,21 @@ def encode_varint(value: int) -> bytes:
             break
     return bytes(out)
 
+
 def decode_varint(buf: bytes, offset: int = 0) -> tuple:
+    """Returns (value, bytes_consumed)."""
     value = 0
     shift = 0
-    pos = offset
+    pos   = offset
     while True:
         if pos >= len(buf):
-            raise ValueError("Incomplete varint")
-        b = buf[pos]
+            raise ValueError(f"Incomplete VarInt at offset {offset}")
+        b      = buf[pos]
         value |= (b & 0x7F) << shift
-        pos += 1
+        pos   += 1
         if not (b & 0x80):
             break
         shift += 7
         if shift > 35:
-            raise ValueError("Varint too long")
+            raise ValueError("VarInt too long")
     return value, pos - offset

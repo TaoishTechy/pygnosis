@@ -1,6 +1,7 @@
 {
-  "protocols": ["1.14"],
-  "default_protocol": "1.14",
+  "protocols": ["1.8", "1.12.2"],
+  "default_protocol": "1.8",
+  "read_timeout": 30.0,
   "ring_buffer_size": 16384,
   "autopoietic": {
     "enabled": false,
