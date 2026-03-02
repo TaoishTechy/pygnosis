@@ -16,54 +16,6 @@ if TYPE_CHECKING:
 
 from core import CorrelationOperator, CorrelationGraphManager, _total_coherence, adjust_global_coherence
 
-# --- Ring Buffer (zero-copy I/O) with peek ---
-class RingBuffer:
-    """Lock-free ring buffer for network I/O."""
-    def __init__(self, size: int):
-        self.buf = bytearray(size)
-        self.size = size
-        self.read_pos = 0
-        self.write_pos = 0
-
-    def write(self, data: bytes) -> int:
-        """Write data, returns number of bytes written (may be partial if full)."""
-        available = self.size - ((self.write_pos - self.read_pos) % self.size)
-        to_write = min(len(data), available)
-        end = self.write_pos + to_write
-        if end <= self.size:
-            self.buf[self.write_pos:end] = data[:to_write]
-        else:
-            first = self.size - self.write_pos
-            self.buf[self.write_pos:] = data[:first]
-            self.buf[:end - self.size] = data[first:to_write]
-        self.write_pos = (self.write_pos + to_write) % self.size
-        return to_write
-
-    def read(self, size: int) -> bytes:
-        """Read up to size bytes and advance read pointer."""
-        available = (self.write_pos - self.read_pos) % self.size
-        to_read = min(size, available)
-        end = self.read_pos + to_read
-        if end <= self.size:
-            data = bytes(self.buf[self.read_pos:end])
-        else:
-            first = self.size - self.read_pos
-            data = bytes(self.buf[self.read_pos:] + self.buf[:end - self.size])
-        self.read_pos = (self.read_pos + to_read) % self.size
-        return data
-
-    def peek(self, size: int) -> bytes:
-        """Return up to size bytes without advancing read pointer."""
-        available = (self.write_pos - self.read_pos) % self.size
-        to_peek = min(size, available)
-        end = self.read_pos + to_peek
-        if end <= self.size:
-            data = bytes(self.buf[self.read_pos:end])
-        else:
-            first = self.size - self.read_pos
-            data = bytes(self.buf[self.read_pos:] + self.buf[:end - self.size])
-        return data
-
 # --- PacketOperator for network coherence ---
 class PacketOperator(CorrelationOperator):
     def __init__(self, ptype: str, payload: bytes, src: str):
@@ -76,7 +28,6 @@ class PacketOperator(CorrelationOperator):
 class ClientConnection:
     client_id: str
     transport: asyncio.Transport
-    ring_buffer: RingBuffer
     protocol_state: str = "HANDSHAKE"
     protocol_version: int = -1
     handler: Optional['ProtocolHandler'] = None
@@ -85,16 +36,23 @@ class ClientConnection:
     last_keep_alive_id: int = 0
     keep_alive_task: Optional[asyncio.Task] = None
     keep_alive_interval: float = 20.0  # seconds
+    _closed: bool = False
 
     async def send_packet(self, packet_id: int, data: bytes):
+        if self._closed:
+            return
         payload = bytes([packet_id]) + data
         length = encode_varint(len(payload))
         full_data = length + payload
         self.transport.write(full_data)
 
     async def close(self):
+        if self._closed:
+            return
+        self._closed = True
         if self.keep_alive_task:
             self.keep_alive_task.cancel()
+            self.keep_alive_task = None
         self.transport.close()
 
 class NetworkManager:
@@ -104,6 +62,7 @@ class NetworkManager:
         self.clients: Dict[str, ClientConnection] = {}
         self.packet_graph = CorrelationGraphManager()
         self.server = None
+        self.read_timeout = self.config.get("read_timeout", 30.0)  # seconds
 
     async def start(self, host: str, port: int):
         self.server = await asyncio.start_server(self.handle_client, host, port)
@@ -114,11 +73,9 @@ class NetworkManager:
 
         client_id = str(uuid.uuid4())
         transport = writer.transport
-        ring_buffer = RingBuffer(65536)
         client = ClientConnection(
             client_id=client_id,
             transport=transport,
-            ring_buffer=ring_buffer,
             handler=HandshakeHandler()
         )
         self.clients[client_id] = client
@@ -129,35 +86,54 @@ class NetworkManager:
                 await self._process_client_data(client, reader)
         except asyncio.CancelledError:
             pass
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
             print(f"🔌 Client {client_id} connection lost")
+        except Exception as e:
+            import traceback
+            print(f"🔥 Unexpected error for client {client_id}: {e}")
+            traceback.print_exc()
         finally:
             await client.close()
-            del self.clients[client_id]
+            if client_id in self.clients:
+                del self.clients[client_id]
             print(f"🔌 Client {client_id} disconnected")
 
     async def _process_client_data(self, client: ClientConnection, reader: asyncio.StreamReader):
-        # Peek VarInt length
-        len_data = await reader.readexactly(1)
-        if not len_data:
-            raise asyncio.CancelledError
+        # Read packet length (VarInt) with timeout
+        try:
+            # First byte with timeout
+            len_data = await asyncio.wait_for(reader.readexactly(1), timeout=self.read_timeout)
+        except asyncio.TimeoutError:
+            print(f"⏰ Client {client.client_id} read timeout (no data for {self.read_timeout}s)")
+            raise asyncio.CancelledError  # trigger disconnect
+
         byte = len_data[0]
         length = byte & 0x7F
-        len_consumed = 1
+        bytes_needed = 1
         while byte & 0x80:
-            len_data = await reader.readexactly(1)
-            if not len_data:
+            # Read next byte
+            try:
+                len_data = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
+            except asyncio.TimeoutError:
+                print(f"⏰ Client {client.client_id} read timeout during varint")
                 raise asyncio.CancelledError
             byte = len_data[0]
             length = (length << 7) | (byte & 0x7F)
-            len_consumed += 1
+            bytes_needed += 1
+            if bytes_needed > 5:
+                raise ValueError("VarInt too long (possible attack)")
 
-        # Read full packet
-        payload = await reader.readexactly(length)
+        # Read full packet payload
+        try:
+            payload = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
+        except asyncio.TimeoutError:
+            print(f"⏰ Client {client.client_id} read timeout for payload")
+            raise asyncio.CancelledError
+
         packet_id = payload[0]
         packet_payload = payload[1:]
 
-        # PacketOperator
+        # PacketOperator for coherence tracking
         pkt_op = PacketOperator(f"0x{packet_id:02x}", packet_payload, client.client_id)
         self.packet_graph.add(pkt_op)
 
@@ -176,9 +152,12 @@ class NetworkManager:
     async def _keep_alive_loop(self, client: ClientConnection):
         """Send keep-alive packets periodically and check for response."""
         try:
-            while client.protocol_state == "PLAY" and client.client_id in self.clients:
+            while not client._closed and client.protocol_state == "PLAY" and client.client_id in self.clients:
                 # Wait before sending next keep-alive
                 await asyncio.sleep(client.keep_alive_interval)
+
+                if client._closed:
+                    break
 
                 # Generate a random keep-alive ID
                 keep_alive_id = random.getrandbits(64)
@@ -191,7 +170,7 @@ class NetworkManager:
                 # Wait for response (timeout half the interval)
                 for _ in range(int(client.keep_alive_interval * 10)):  # check every 0.1s
                     await asyncio.sleep(0.1)
-                    if not client.keep_alive_pending:
+                    if not client.keep_alive_pending or client._closed:
                         break
                 else:
                     # No response – disconnect client
@@ -221,20 +200,12 @@ class NetworkManager:
 
     async def broadcast_packet(self, packet_id: int, data: bytes, exclude=None):
         for cid, client in self.clients.items():
-            if cid != exclude:
+            if cid != exclude and not client._closed:
                 await client.send_packet(packet_id, data)
 
     def get_updates_for_client(self, client_id: str, max_bytes: int) -> List[bytes]:
-        client = self.clients.get(client_id)
-        if not client or client.protocol_state != "PLAY":
-            return []
-        updates = []
-        # In a real implementation, iterate over relevant entities and encode updates
-        # For now, return empty list to keep the demo running
-        return updates
-
-# Global reference (set by main)
-network_manager = None
+        # TODO: implement entity tracking and delta compression
+        return []
 
 # --- VarInt helpers ---
 def encode_varint(value: int) -> bytes:
