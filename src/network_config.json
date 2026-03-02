@@ -1,0 +1,14 @@
+{
+  "protocols": ["1.14"],
+  "default_protocol": "1.14",
+  "ring_buffer_size": 16384,
+  "autopoietic": {
+    "enabled": false,
+    "tune_interval": 30,
+    "golden_ratio": 1.618
+  },
+  "paradox": {
+    "threshold": 1.5,
+    "checksum_interval": 1.0
+  }
+}

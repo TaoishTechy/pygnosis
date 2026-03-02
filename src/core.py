@@ -3,12 +3,11 @@ import asyncio
 import heapq
 import random
 import uuid
-import json
 from typing import Dict, Set, Optional, Any, List, Callable
 
 # Global coherence budget (H₁₃ conservation)
 _total_coherence = 0.0
-_total_coherence_target = 1000.0  # arbitrary, can be adjusted
+_total_coherence_target = 1000.0
 
 # Quiet mode: suppress routine decay messages
 QUIET_DECAY = True
@@ -17,7 +16,6 @@ ROUTINE_REASONS = {"natural decay", "remote event"}
 def adjust_global_coherence(delta: float):
     global _total_coherence
     _total_coherence = max(0.0, _total_coherence + delta)
-    # Could trigger load balancing (H₁₄) if needed
 
 def semantic_distance(type_a: str, type_b: str) -> float:
     return 0.0 if type_a == type_b else 0.5
@@ -36,129 +34,90 @@ class CorrelationOperator:
         self._mers = {"metalness": 0.0, "emissive": 0.0, "roughness": 0.5, "subsurface": 0.0}
         self._animation_params = {"speed": 1.0, "amplitude": 0.0, "phase": 0.0}
         self._lod_bias = 0.0
-        self._dirty_visuals = True   # marks that visual attributes need recomputation
+        self._dirty_visuals = True
 
-        # Register global coherence change
         adjust_global_coherence(initial_ci)
 
     def update_coherence(self, delta: float, reason: str = "", sigma_topo: float = 0.0):
-        """Update coherence with a topological term (sigma_topo) that can add extra.
-           The total change is delta + sigma_topo, but sigma_topo is drawn from global budget."""
         global _total_coherence
         old = self.coherence
-        # sigma_topo must be taken from global budget if positive, or returned if negative
         if sigma_topo > 0:
-            # ensure we have enough global coherence
             available = _total_coherence - _total_coherence_target
             sigma_topo = min(sigma_topo, max(0, available))
-        elif sigma_topo < 0:
-            # returning coherence to global pool
-            pass
-        total_delta = delta + sigma_topo
-        new_ci = max(0.0, min(1.0, self.coherence + total_delta))
-        actual_delta = new_ci - self.coherence
-        self.coherence = new_ci
+        self.coherence = max(0.0, min(1.0, self.coherence + delta + sigma_topo))
+        adjust_global_coherence(self.coherence - old)
+        if reason != "natural decay" and (not QUIET_DECAY or reason not in ROUTINE_REASONS):
+            print(f" {self.id[:12]} CI {old:.2f} → {self.coherence:.2f} ({reason})")
         self.active = self.coherence > 0.3
-        # Update global coherence
-        adjust_global_coherence(actual_delta)
-        # Only print if change is significant or reason is not routine
-        if abs(actual_delta) > 0.05 or (QUIET_DECAY and reason not in ROUTINE_REASONS):
-            print(f" {self.id[:12]:<12} CI {old:.2f} → {self.coherence:.2f} ({reason})")
-        self._dirty_visuals = True
+        self.mark_visuals_dirty()
 
     def mark_visuals_dirty(self):
         self._dirty_visuals = True
 
     def update_visuals(self):
-        """Recompute visual attributes from current coherence. To be overridden."""
-        # Base mapping
-        self._mers["emissive"] = min(1.0, self.coherence * 0.8)
-        self._mers["roughness"] = max(0.1, 1.0 - self.coherence * 0.7)
+        if not self._dirty_visuals:
+            return
+        self._mers["emissive"] = self.coherence * 0.8
+        self._mers["roughness"] = 1.0 - self.coherence * 0.7
+        self._animation_params["speed"] = 1.0 + self.coherence * 0.5
         self._animation_params["amplitude"] = self.coherence * 0.5
-        self._animation_params["speed"] = 0.8 + self.coherence * 0.4
-        self._lod_bias = (self.coherence - 0.5) * 2.0
+        self._lod_bias = -1.0 + self.coherence * 2.0
         self._dirty_visuals = False
 
-    def ensure_visuals(self):
-        if self._dirty_visuals:
-            self.update_visuals()
-
-    @property
-    def mers(self):
-        self.ensure_visuals()
-        return self._mers
-
-    @property
-    def animation_params(self):
-        self.ensure_visuals()
-        return self._animation_params
-
-    @property
-    def lod_bias(self):
-        self.ensure_visuals()
-        return self._lod_bias
-
-    def to_network_dict(self) -> Dict[str, Any]:
-        self.ensure_visuals()
+    def to_network_dict(self) -> dict:
+        self.update_visuals()
         return {
             "id": self.id,
             "type": self.type,
             "coherence": self.coherence,
-            "mers": self._mers.copy(),
-            "anim": self._animation_params.copy(),
+            "mers": self._mers,
+            "anim": self._animation_params,
             "lod_bias": self._lod_bias,
+            "active": self.active,
         }
-
-
-# Registry of block types and their structure constants (commutators)
-# Format: (dx, dy, dz) -> (target_block_type_pattern, resulting_action)
-# For simplicity, we define a sparse structure.
-_block_interactions = {
-    # stone (id 1) can be broken by player (special case, handled via events)
-    # redstone wire example: if adjacent redstone changes, update
-    # We'll simulate with a simple rule: any block change triggers a small excitation in neighbors
-}
-
-def register_block_interaction(block_type: str, neighbor_offset: tuple, target_type: str, action: Callable):
-    """Register a rule for commutator [block, neighbor]."""
-    key = (block_type, neighbor_offset)
-    _block_interactions[key] = (target_type, action)
-
 
 class CorrelationGraphManager:
     def __init__(self):
         self.operators: Dict[str, CorrelationOperator] = {}
-        self.excited = []  # priority queue (-ci, id)
+        self.excited: List[tuple] = []  # min-heap (-coherence, oid)
 
-    def add(self, op: CorrelationOperator):
+    def add(self, op: CorrelationOperator, edges: List[str] = None):
+        if op.id in self.operators:
+            return
         self.operators[op.id] = op
-        if op.active:
-            heapq.heappush(self.excited, (-op.coherence, op.id))
+        if edges:
+            for e in edges:
+                op.edges.add(e)
+                if e in self.operators:
+                    self.operators[e].edges.add(op.id)
+
+    def remove(self, oid: str):
+        if oid not in self.operators:
+            return
+        op = self.operators.pop(oid)
+        adjust_global_coherence(-op.coherence)
+        for n in op.edges:
+            if n in self.operators:
+                self.operators[n].edges.discard(oid)
 
     def get(self, oid: str) -> Optional[CorrelationOperator]:
         return self.operators.get(oid)
 
-    def apply_commutator(self, id1: str, id2: str, strength: float = 0.25, sigma_topo: float = 0.0):
-        """Apply a commutator between two operators, possibly using structure constants."""
-        o1 = self.operators.get(id1)
-        o2 = self.operators.get(id2)
-        if not o1 or not o2:
+    def apply_commutator(self, oid_a: str, oid_b: str, strength: float = 0.1):
+        if oid_a not in self.operators or oid_b not in self.operators:
             return
-        # Basic interaction: both gain/lose coherence
-        delta = strength * (o1.coherence + o2.coherence) / 2
-        o1.update_coherence(delta * 0.6, f"comm with {id2}", sigma_topo=sigma_topo*0.6)
-        o2.update_coherence(delta * 0.6, f"comm with {id1}", sigma_topo=sigma_topo*0.6)
-        o1.edges.add(id2)
-        o2.edges.add(id1)
-        if o1.active:
-            heapq.heappush(self.excited, (-o1.coherence, o1.id))
-        if o2.active:
-            heapq.heappush(self.excited, (-o2.coherence, o2.id))
+        a = self.operators[oid_a]
+        b = self.operators[oid_b]
+        dist = semantic_distance(a.type, b.type)
+        delta = strength * (1.0 - dist)
+        a.update_coherence(delta, f"commutator with {b.id[:8]}", sigma_topo=delta * 0.5)
+        b.update_coherence(delta, f"commutator with {a.id[:8]}", sigma_topo=delta * 0.5)
+        heapq.heappush(self.excited, (-a.coherence, a.id))
+        heapq.heappush(self.excited, (-b.coherence, b.id))
 
-    def propagate(self, max_steps: int = 8):
-        """Propagate excitement through the graph."""
-        steps = 0
+    def propagate(self, max_steps: int = 12):
         seen = set()
+        steps = 0
         while self.excited and steps < max_steps:
             _, oid = heapq.heappop(self.excited)
             if oid in seen:
@@ -167,20 +126,16 @@ class CorrelationGraphManager:
             op = self.operators.get(oid)
             if op:
                 for n in list(op.edges):
-                    # Use structure constants if available for specific types
-                    # Here we just apply a small commutator with random chance
                     if random.random() < 0.4:
                         self.apply_commutator(oid, n, 0.09)
             steps += 1
 
-
 class CoherenceScheduler:
     def __init__(self, graph: CorrelationGraphManager, engine=None):
         self.graph = graph
-        self.engine = engine  # reference to physics engine for network callbacks
+        self.engine = engine
 
     async def tick(self):
-        """One simulation tick: decay, remote events, then propagate."""
         for op in list(self.graph.operators.values()):
             if op.active:
                 op.update_coherence(-0.012, "natural decay")
@@ -188,15 +143,9 @@ class CoherenceScheduler:
                 op.update_coherence(0.08, "remote event")
         self.graph.propagate()
 
-        # After simulation, trigger network updates if engine has network manager
         if self.engine and self.engine.network_manager:
-            # For each client, generate and send updates
-            for client_id, client in self.engine.network_manager.clients.items():
-                updates = self.engine.network_manager.get_updates_for_client(client_id, 1024)
-                # In real implementation, updates would be packets; for now just log
-                if updates:
-                    pass  # we'll trust network manager to handle sending
-
+            # Future: trigger network updates per client
+            pass
 
 class PhysicsEngine:
     def __init__(self):
@@ -204,9 +153,7 @@ class PhysicsEngine:
         self.scheduler = CoherenceScheduler(self.graph, engine=self)
         self.running = False
         self.tick_rate = 20
-        # Boundary store: simple dict mapping chunk_id to compressed data (bytes)
         self.boundary_store = {}
-        # Network manager (set by main after creation)
         self.network_manager = None
 
     async def start(self):
