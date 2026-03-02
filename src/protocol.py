@@ -5,7 +5,7 @@ import json
 import struct
 import random
 from typing import Dict, Optional
-from network import encode_varint, decode_varint, ClientConnection, network_manager
+from network import encode_varint, decode_varint, ClientConnection
 
 # Protocol version ranges
 SUPPORTED_VERSIONS = {
@@ -22,29 +22,33 @@ class ProtocolHandler:
         self.status_packets = {}
 
     async def handle_packet(self, client: ClientConnection, packet_id: int, payload: bytes, engine):
-        if client.protocol_state == "HANDSHAKE":
-            if self.handshake_handler:
-                await self.handshake_handler(client, payload, engine)
-            else:
-                print(f"⚠️ No handshake handler for {self.version}")
-        elif client.protocol_state == "LOGIN":
-            handler = self.login_packets.get(packet_id)
-            if handler:
-                await handler(client, payload, engine)
-            else:
-                print(f"⚠️ Unhandled login packet 0x{packet_id:02x}")
-        elif client.protocol_state == "PLAY":
-            handler = self.play_packets.get(packet_id)
-            if handler:
-                await handler(client, payload, engine)
-            else:
-                print(f"⚠️ Unhandled play packet 0x{packet_id:02x}")
-        elif client.protocol_state == "STATUS":
-            handler = self.status_packets.get(packet_id)
-            if handler:
-                await handler(client, payload, engine)
-            else:
-                print(f"⚠️ Unhandled status packet 0x{packet_id:02x}")
+        try:
+            if client.protocol_state == "HANDSHAKE":
+                if self.handshake_handler:
+                    await self.handshake_handler(client, payload, engine)
+                else:
+                    print(f"⚠️ No handshake handler for {self.version}")
+            elif client.protocol_state == "LOGIN":
+                handler = self.login_packets.get(packet_id)
+                if handler:
+                    await handler(client, payload, engine)
+                else:
+                    print(f"⚠️ Unhandled login packet 0x{packet_id:02x}")
+            elif client.protocol_state == "PLAY":
+                handler = self.play_packets.get(packet_id)
+                if handler:
+                    await handler(client, payload, engine)
+                else:
+                    print(f"⚠️ Unhandled play packet 0x{packet_id:02x}")
+            elif client.protocol_state == "STATUS":
+                handler = self.status_packets.get(packet_id)
+                if handler:
+                    await handler(client, payload, engine)
+                else:
+                    print(f"⚠️ Unhandled status packet 0x{packet_id:02x}")
+        except Exception as e:
+            print(f"🔥 Error in packet handler for {client}: {e}")
+            await client.close()
 
     def encode_string(self, s: str) -> bytes:
         data = s.encode('utf-8')
@@ -65,7 +69,7 @@ class Protocol_1_14(ProtocolHandler):
         self.login_packets = {
             0x00: self.handle_login_start,
         }
-        # Corrected serverbound packet IDs for 1.14 (based on wiki.vg)
+        # Corrected serverbound packet IDs for 1.14 (wiki.vg)
         self.play_packets = {
             0x00: self.handle_teleport_confirm,      # Teleport Confirm
             0x03: self.handle_chat_message,          # Chat Message
@@ -86,7 +90,8 @@ class Protocol_1_14(ProtocolHandler):
     async def handle_login_start(self, client: ClientConnection, payload: bytes, engine):
         username, _ = self.decode_string(payload)
         client.username = username
-        uid = uuid.uuid3(uuid.NAMESPACE_DNS, username)
+        # Use OfflinePlayer: prefix for offline UUIDs (like vanilla)
+        uid = uuid.uuid3(uuid.NAMESPACE_DNS, "OfflinePlayer:" + username)
         data = self.encode_uuid(uid) + self.encode_string(username)
         await client.send_packet(0x02, data)          # Login success
         client.protocol_state = "PLAY"
@@ -95,7 +100,7 @@ class Protocol_1_14(ProtocolHandler):
         # Send Join Game FIRST (mandatory)
         await self.send_join_game(client, engine)
 
-        # Then send all other essential packets
+        # Then all other essential packets
         await self.send_server_difficulty(client, engine)
         await self.send_spawn_position(client, engine)
         await self.send_player_position_look(client, engine)
@@ -105,8 +110,8 @@ class Protocol_1_14(ProtocolHandler):
         await self.send_player_info(client, engine)   # optional, but nice
 
         # Start keep-alive loop
-        if network_manager:
-            network_manager.start_keep_alive(client)
+        if engine.network_manager:
+            engine.network_manager.start_keep_alive(client)
 
         # Send initial chunk
         chunk = engine.graph.get("chunk_0_0")
@@ -121,9 +126,11 @@ class Protocol_1_14(ProtocolHandler):
 
     async def send_player_info(self, client: ClientConnection, engine):
         """Send Player Info packet (0x33) – add player action."""
+        # For now, only send info about this player. In a full implementation,
+        # you would also send info about all online players to this client.
         data = encode_varint(0)                        # action: add player
         data += encode_varint(1)                       # number of players
-        uid = uuid.uuid3(uuid.NAMESPACE_DNS, client.username)
+        uid = uuid.uuid3(uuid.NAMESPACE_DNS, "OfflinePlayer:" + client.username)
         data += self.encode_uuid(uid)                  # player UUID
         data += self.encode_string(client.username)    # player name
         data += encode_varint(0)                       # number of properties (no skin)
@@ -164,7 +171,8 @@ class Protocol_1_14(ProtocolHandler):
         await client.send_packet(0x40, data)
 
     async def send_player_abilities(self, client: ClientConnection, engine):
-        data = b'\x0A'                                 # flags: god mode + flying
+        # Flags: 0x00 = survival, no flying, no invulnerability
+        data = b'\x00'
         data += struct.pack('>ff', 0.05, 0.1)          # flying speed, FOV mod
         await client.send_packet(0x31, data)            # 0x31 = Player Abilities
 
@@ -178,8 +186,8 @@ class Protocol_1_14(ProtocolHandler):
         data = struct.pack('>i', cx)
         data += struct.pack('>i', cz)
         # Trust edges (empty)
-        data += b'\x00'  # sky light mask (VarInt 0)
-        data += b'\x00'  # block light mask (VarInt 0)
+        data += encode_varint(0)  # sky light mask (VarInt 0)
+        data += encode_varint(0)  # block light mask (VarInt 0)
         # Empty arrays (implied by masks)
         await client.send_packet(packet_id, data)
 
@@ -187,7 +195,7 @@ class Protocol_1_14(ProtocolHandler):
         """Chunk Data packet for 1.14 – 4 bits per block, no lighting, correct NBT."""
         x = struct.pack('>i', chunk.cx)
         z = struct.pack('>i', chunk.cz)
-        full = b'\x01'                                 # Full chunk
+        full = b'\x00'                                 # FIX: must be False when not all sections present
         bitmask = encode_varint(1)                     # Section 0 present
 
         # Heightmaps NBT: compound with two long arrays (36 longs each)
@@ -207,7 +215,7 @@ class Protocol_1_14(ProtocolHandler):
         biomes = struct.pack('>256i', *([1] * 256))
 
         # Section data: one section at Y=0 with air palette
-        section = struct.pack('>h', 0)                  # block count
+        section = struct.pack('>h', 0)                  # block count (0 = all air)
         section += b'\x04'                               # bits per block (min 4)
         section += encode_varint(1)                      # palette length
         section += encode_varint(0)                      # air ID
@@ -226,6 +234,7 @@ class Protocol_1_14(ProtocolHandler):
     async def handle_teleport_confirm(self, client: ClientConnection, payload: bytes, engine):
         """Teleport Confirm (0x00) – sent by client after Player Position & Look."""
         teleport_id, _ = decode_varint(payload)
+        # Optionally verify teleport ID
 
     async def handle_keep_alive_response(self, client: ClientConnection, payload: bytes, engine):
         """Keep Alive response (0x10) – 8-byte long."""
@@ -260,8 +269,10 @@ class Protocol_1_14(ProtocolHandler):
     async def handle_chat_message(self, client: ClientConnection, payload: bytes, engine):
         msg = payload.decode('utf-8')
         print(f"💬 {client.username}: {msg}")
-        if network_manager:
-            await network_manager.broadcast_packet(0x02, payload, exclude=client.client_id)
+        if engine.network_manager:
+            # Proper chat packet: position (0=chat) and sender UUID
+            data = b'\x00' + self.encode_string(msg) + self.encode_uuid(uuid.UUID(int=0))
+            await engine.network_manager.broadcast_packet(0x02, data, exclude=client.client_id)
 
     async def handle_player_position(self, client: ClientConnection, payload: bytes, engine):
         if len(payload) < 25:
@@ -276,7 +287,7 @@ class Protocol_1_14(ProtocolHandler):
     async def handle_status_request(self, client: ClientConnection, payload: bytes, engine):
         response = {
             "version": {"name": "Pygnosis 1.14", "protocol": 477},
-            "players": {"max": 20, "online": len(engine.network_manager.clients)},
+            "players": {"max": 20, "online": len(engine.network_manager.clients) if engine.network_manager else 0},
             "description": {"text": "Pygnosis MOGOPS Server"}
         }
         json_str = json.dumps(response)
