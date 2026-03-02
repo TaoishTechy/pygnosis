@@ -65,14 +65,14 @@ class Protocol_1_14(ProtocolHandler):
         self.login_packets = {
             0x00: self.handle_login_start,
         }
-        # Corrected packet mappings for 1.14 Play state
+        # Corrected serverbound packet IDs for 1.14 (based on wiki.vg)
         self.play_packets = {
-            0x00: self.handle_teleport_confirm,      # Teleport Confirm (was incorrectly 0x00 Keep Alive)
-            0x05: self.handle_client_settings,
-            0x0A: self.handle_plugin_message,
-            0x0B: self.handle_keep_alive_response,   # Keep Alive (now 0x0B)
-            0x0E: self.handle_chat_message,
-            0x10: self.handle_player_position,
+            0x00: self.handle_teleport_confirm,      # Teleport Confirm
+            0x03: self.handle_chat_message,          # Chat Message
+            0x05: self.handle_client_settings,       # Client Settings
+            0x0B: self.handle_plugin_message,        # Plugin Message
+            0x10: self.handle_keep_alive_response,   # Keep Alive
+            0x12: self.handle_player_position,       # Player Position
         }
         self.status_packets = {
             0x00: self.handle_status_request,
@@ -80,7 +80,7 @@ class Protocol_1_14(ProtocolHandler):
         }
 
     async def handle_handshake(self, client: ClientConnection, payload: bytes, engine):
-        # This should not be called because HandshakeHandler handles the initial handshake.
+        # Handled by HandshakeHandler
         pass
 
     async def handle_login_start(self, client: ClientConnection, payload: bytes, engine):
@@ -92,27 +92,27 @@ class Protocol_1_14(ProtocolHandler):
         client.protocol_state = "PLAY"
         print(f"✅ {username} logged in as {uid}")
 
-        # Send Player Info so client knows its own entity
-        await self.send_player_info(client, engine)
-
-        # Send essential game packets
+        # Send Join Game FIRST (mandatory)
         await self.send_join_game(client, engine)
+
+        # Then send all other essential packets
         await self.send_server_difficulty(client, engine)
         await self.send_spawn_position(client, engine)
         await self.send_player_position_look(client, engine)
         await self.send_update_view_position(client, engine)
         await self.send_player_abilities(client, engine)
         await self.send_time_update(client, engine)
+        await self.send_player_info(client, engine)   # optional, but nice
 
-        # Start keep-alive
+        # Start keep-alive loop
         if network_manager:
             network_manager.start_keep_alive(client)
 
-        # Send the initial chunk
+        # Send initial chunk
         chunk = engine.graph.get("chunk_0_0")
         if chunk:
             chunk_data = self.encode_chunk(chunk)
-            await client.send_packet(0x22, chunk_data)
+            await client.send_packet(0x21, chunk_data)   # Chunk Data = 0x21
             print(f"📦 Sent initial chunk data ({len(chunk_data)} bytes)")
             chunk.update_coherence(0.2, "chunk sent to client", sigma_topo=0.3)
 
@@ -120,7 +120,7 @@ class Protocol_1_14(ProtocolHandler):
             await self.send_update_light(client, chunk.cx, chunk.cz)
 
     async def send_player_info(self, client: ClientConnection, engine):
-        """Send Player Info packet (0x34) – add player action."""
+        """Send Player Info packet (0x33) – add player action."""
         data = encode_varint(0)                        # action: add player
         data += encode_varint(1)                       # number of players
         uid = uuid.uuid3(uuid.NAMESPACE_DNS, client.username)
@@ -130,19 +130,18 @@ class Protocol_1_14(ProtocolHandler):
         data += encode_varint(0)                       # gamemode (survival)
         data += encode_varint(0)                        # ping (0 ms)
         data += b'\x00'                                  # has display name? false
-        await client.send_packet(0x34, data)
+        await client.send_packet(0x33, data)            # 0x33 = Player Info
 
     async def send_join_game(self, client: ClientConnection, engine):
         packet_id = 0x25
         data = struct.pack('>i', 1)  # entity ID
         data += b'\x00'              # gamemode (survival)
         data += struct.pack('>i', 0) # dimension (overworld)
-        # FIX: Difficulty byte MUST be present in 1.14 (removed in 1.15)
         data += b'\x02'              # difficulty (normal)
         data += b'\x14'              # max players (20)
         data += self.encode_string("default")  # level type
-        data += encode_varint(10)     # view distance
-        data += b'\x00'               # reduced debug info
+        data += b'\x00'               # reduced debug info (false)
+        # NO view distance field here in 1.14!
         await client.send_packet(packet_id, data)
 
     async def send_server_difficulty(self, client: ClientConnection, engine):
@@ -158,7 +157,7 @@ class Protocol_1_14(ProtocolHandler):
         data = struct.pack('>dddff', 0.0, 64.0, 0.0, 0.0, 0.0)  # x y z yaw pitch
         data += b'\x00'                # flags
         data += encode_varint(0)        # teleport ID
-        await client.send_packet(0x36, data)
+        await client.send_packet(0x35, data)   # 0x35 = Player Position & Look
 
     async def send_update_view_position(self, client: ClientConnection, engine):
         data = encode_varint(0) + encode_varint(0)  # chunk X Z
@@ -167,7 +166,7 @@ class Protocol_1_14(ProtocolHandler):
     async def send_player_abilities(self, client: ClientConnection, engine):
         data = b'\x0A'                                 # flags: god mode + flying
         data += struct.pack('>ff', 0.05, 0.1)          # flying speed, FOV mod
-        await client.send_packet(0x32, data)
+        await client.send_packet(0x31, data)            # 0x31 = Player Abilities
 
     async def send_time_update(self, client: ClientConnection, engine):
         data = struct.pack('>qq', 0, 6000)             # world age, time of day
@@ -182,7 +181,6 @@ class Protocol_1_14(ProtocolHandler):
         data += b'\x00'  # sky light mask (VarInt 0)
         data += b'\x00'  # block light mask (VarInt 0)
         # Empty arrays (implied by masks)
-        # The client will assume full brightness if no light arrays are sent.
         await client.send_packet(packet_id, data)
 
     def encode_chunk(self, chunk) -> bytes:
@@ -196,7 +194,6 @@ class Protocol_1_14(ProtocolHandler):
         long_array_len = struct.pack('>i', 36)
         longs_zero = b'\x00' * (36 * 8)
 
-        # FIX: Use big-endian short for NBT string length
         motion_name = struct.pack('>H', 15) + b'MOTION_BLOCKING'
         world_name = struct.pack('>H', 13) + b'WORLD_SURFACE'
 
@@ -211,13 +208,11 @@ class Protocol_1_14(ProtocolHandler):
 
         # Section data: one section at Y=0 with air palette
         section = struct.pack('>h', 0)                  # block count
-        # FIX: Minimum 4 bits per block; data array length must be 256 longs
         section += b'\x04'                               # bits per block (min 4)
         section += encode_varint(1)                      # palette length
         section += encode_varint(0)                      # air ID
         section += encode_varint(256)                    # data array length (256 longs)
         section += b'\x00' * (256 * 8)                   # data array zeros
-        # No lighting data in 1.14 chunk packet
 
         data_size = encode_varint(len(section))
         data = section
@@ -231,11 +226,9 @@ class Protocol_1_14(ProtocolHandler):
     async def handle_teleport_confirm(self, client: ClientConnection, payload: bytes, engine):
         """Teleport Confirm (0x00) – sent by client after Player Position & Look."""
         teleport_id, _ = decode_varint(payload)
-        # Optionally log or update coherence
-        # print(f"🔄 {client.username} confirmed teleport {teleport_id}")
 
     async def handle_keep_alive_response(self, client: ClientConnection, payload: bytes, engine):
-        """Keep Alive response (0x0B) – 8-byte long."""
+        """Keep Alive response (0x10) – 8-byte long."""
         if len(payload) == 8:
             received_id = int.from_bytes(payload, 'big')
             if received_id == client.last_keep_alive_id:
