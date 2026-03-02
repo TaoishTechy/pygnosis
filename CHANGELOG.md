@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.3] - 2025-03-02
+### Fixed (Protocol & Network)
+- **Packet IDs for 1.14** – corrected to match protocol 477 (wiki.vg):
+  - Player Info: `0x30` (was `0x33`)
+  - Player Abilities: `0x2E` (was `0x31`)
+  - Player Position & Look: `0x32` (was `0x35`)
+  - Spawn Position: `0x43` (was `0x42`)
+  - Time Update: `0x4A` (was `0x4E`)
+  - Update Light: `0x24` (was `0x23`)
+  - Chat Message (outgoing): `0x0F` (was `0x02`)
+- **Join Game packet (0x25)** – removed erroneous `difficulty` byte and added missing `view distance` VarInt; packet now matches 1.14 specification.
+- **Update Light packet** – corrected coordinate fields to VarInt (was Int) and added four masks as required.
+- **NBT heightmaps in chunk data** – root compound is now unnamed (length 0), preventing client parsing errors.
+- **`handle_handshake` in `Protocol_1_14`** – now raises `RuntimeError` to catch accidental calls.
+- **Exception handling** – added try/except around packet handlers to log errors and close client gracefully.
+
+### Improved
+- **Robotics temperature simulation** – added cooling when fan is active to prevent runaway heating.
+- **Error logging** – tracebacks are now printed for unexpected exceptions, aiding debugging.
+
 ## [1.0.2] - 2025-03-01
 ### Fixed
 - **Chunk data packet** – set `full` flag to `False` (`b'\x00'`) when only one chunk section is sent; previously `True` caused the client to read beyond the buffer and disconnect.
