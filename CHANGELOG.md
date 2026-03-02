@@ -1,5 +1,3 @@
-# Changelog
-
 # CHANGELOG
 
 ## [0.3.0] — 2026-03-02 — First Successful Client Connection
